@@ -4,126 +4,94 @@ import * as crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 /**
- * TakinaInoue27 — News-Image-01 Frontpage Atlas Entrypoint:
- * "Friday 13 November 2026: 31 Verified Stories Across 6 Continents & Global Map"
- *
- * Validates and emits the 1024x1024 frontpage broadsheet (`frontpage.jpg`)
- * to `/output/entry.png` for the make.fun `news-image-01` competition.
+ * news-image-01: The Chisato Chronicle: 30-Story Illustrated Broadsheet Edition (13 Nov 2026)
+ * Verified Friday 13 November 2026 multi-continent illustrated edition (30 stories).
  */
 
-interface FrontpageSpec {
-  encoding: "JPEG";
-  cols: number;
-  rows: number;
-  byteCount: number;
-  sha256Hex: string;
+interface BroadsheetSpec {
+  format: "JPEG";
+  width: number;
+  height: number;
+  bytes: number;
+  digest: string;
 }
 
-const FRONTPAGE_ASSET = "frontpage.jpg";
-const REQUIRED_COLS = 1024;
-const REQUIRED_ROWS = 1024;
-const BYTE_BUDGET = 1048576;
-const EXPECTED_FRONTPAGE_SHA256 = "d1bc706cfc2ace48ca3a786c0d7b46b78d0982d12b768f1e4a612d9f9556bd24";
+const ASSET_FILENAME = "chisato_chronicle.jpg";
+const TARGET_WIDTH = 1024;
+const TARGET_HEIGHT = 1024;
+const BYTE_LIMIT = 1048576;
+const EXPECTED_DIGEST = "5192d5c4e627ed72bf8a7660a0c6404c8ba43871246c4db3acc7950df0c03876";
 
-function extractJpegFrameSize(buf: Buffer): { cols: number; rows: number } {
-  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) {
-    throw new Error("Missing JPEG SOI signature (0xFFD8)");
+function inspectSofHeader(raw: Buffer): { width: number; height: number } {
+  if (raw.length < 4 || raw[0] !== 0xff || raw[1] !== 0xd8) {
+    throw new Error("Invalid JPEG header: missing SOI marker");
   }
-  if (buf[buf.length - 2] !== 0xff || buf[buf.length - 1] !== 0xd9) {
-    throw new Error("Missing JPEG EOI marker (0xFFD9)");
+  if (raw[raw.length - 2] !== 0xff || raw[raw.length - 1] !== 0xd9) {
+    throw new Error("Invalid JPEG footer: missing EOI marker");
   }
-
-  let idx = 2;
-  while (idx + 4 <= buf.length) {
-    if (buf[idx] !== 0xff) {
-      throw new Error(`Invalid JPEG segment prefix at byte ${idx}`);
+  let cursor = 2;
+  while (cursor + 4 <= raw.length) {
+    if (raw[cursor] !== 0xff) {
+      throw new Error(`Malformed JPEG marker alignment at ${cursor}`);
     }
-    while (idx < buf.length && buf[idx] === 0xff) {
-      idx++;
+    while (cursor < raw.length && raw[cursor] === 0xff) {
+      cursor++;
     }
-    if (idx >= buf.length) break;
-    const tag = buf[idx];
-    idx++;
-
+    if (cursor >= raw.length) break;
+    const tag = raw[cursor++];
     if (tag === 0xd8 || tag === 0xd9 || (tag >= 0xd0 && tag <= 0xd7) || tag === 0x01) {
       continue;
     }
-    if (idx + 2 > buf.length) break;
-    const blockLen = buf.readUInt16BE(idx);
-    if (blockLen < 2 || idx + blockLen > buf.length) {
-      throw new Error(`Out-of-bounds JPEG block length ${blockLen} at tag 0x${tag.toString(16)}`);
+    if (cursor + 2 > raw.length) break;
+    const segLen = raw.readUInt16BE(cursor);
+    if (segLen < 2 || cursor + segLen > raw.length) {
+      throw new Error(`Out-of-bounds JPEG segment length ${segLen}`);
     }
-
     if (tag === 0xc0 || tag === 0xc2) {
-      if (blockLen < 7) {
-        throw new Error("Incomplete JPEG SOF segment");
-      }
-      const rows = buf.readUInt16BE(idx + 3);
-      const cols = buf.readUInt16BE(idx + 5);
-      return { cols, rows };
+      if (segLen < 7) throw new Error("Truncated SOF frame segment");
+      const height = raw.readUInt16BE(cursor + 3);
+      const width = raw.readUInt16BE(cursor + 5);
+      return { width, height };
     }
-    idx += blockLen;
+    cursor += segLen;
   }
-  throw new Error("No SOF0/SOF2 frame header located in JPEG buffer");
+  throw new Error("No SOF0/SOF2 resolution marker discovered");
 }
 
-function loadAndCheckFrontpage(assetFile: string): { payload: Buffer; spec: FrontpageSpec } {
-  const payload = fs.readFileSync(assetFile);
-  if (payload.length === 0 || payload.length > BYTE_BUDGET) {
-    throw new Error(`Frontpage size ${payload.length} exceeds 1 MiB budget (${BYTE_BUDGET})`);
+function verifyBroadsheetPlate(assetPath: string): { payload: Buffer; meta: BroadsheetSpec } {
+  const payload = fs.readFileSync(assetPath);
+  if (payload.length === 0 || payload.length > BYTE_LIMIT) {
+    throw new Error(`Asset byte count ${payload.length} violates 1 MiB ceiling`);
   }
-
-  const { cols, rows } = extractJpegFrameSize(payload);
-  if (cols !== REQUIRED_COLS || rows !== REQUIRED_ROWS) {
-    throw new Error(`Frontpage geometry ${cols}x${rows} does not match ${REQUIRED_COLS}x${REQUIRED_ROWS}`);
+  const { width, height } = inspectSofHeader(payload);
+  if (width !== TARGET_WIDTH || height !== TARGET_HEIGHT) {
+    throw new Error(`Expected ${TARGET_WIDTH}x${TARGET_HEIGHT}, observed ${width}x${height}`);
   }
-
-  const sha256Hex = crypto.createHash("sha256").update(payload).digest("hex");
-  if (sha256Hex !== EXPECTED_FRONTPAGE_SHA256) {
-    throw new Error(`Frontpage digest mismatch: expected ${EXPECTED_FRONTPAGE_SHA256}, actual ${sha256Hex}`);
+  const digest = crypto.createHash("sha256").update(payload).digest("hex");
+  if (digest !== EXPECTED_DIGEST) {
+    throw new Error(`Integrity check failed: expected ${EXPECTED_DIGEST}, got ${digest}`);
   }
-
   return {
     payload,
-    spec: {
-      encoding: "JPEG",
-      cols,
-      rows,
-      byteCount: payload.length,
-      sha256Hex,
-    },
+    meta: { format: "JPEG", width, height, bytes: payload.length, digest },
   };
 }
 
-function emitEntryImage(): void {
-  const baseDir = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    path.join(baseDir, FRONTPAGE_ASSET),
-    path.join("/bot", FRONTPAGE_ASSET),
-  ];
-
-  let chosenFile = "";
-  for (const item of candidates) {
-    if (fs.existsSync(item)) {
-      chosenFile = item;
-      break;
-    }
+function emitEntry(): void {
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [path.join(scriptDir, ASSET_FILENAME), path.join("/bot", ASSET_FILENAME)];
+  const resolved = candidates.find((p) => fs.existsSync(p));
+  if (!resolved) {
+    throw new Error(`Missing source front-page graphic: ${ASSET_FILENAME}`);
   }
-  if (!chosenFile) {
-    throw new Error(`Cannot locate ${FRONTPAGE_ASSET} in repository root`);
-  }
-
-  const { payload, spec } = loadAndCheckFrontpage(chosenFile);
-  const outRoot = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-  fs.mkdirSync(outRoot, { recursive: true });
-  const targetPng = path.join(outRoot, "entry.png");
-  fs.writeFileSync(targetPng, payload);
-
+  const { payload, meta } = verifyBroadsheetPlate(resolved);
+  const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
+  fs.mkdirSync(outDir, { recursive: true });
+  const target = path.join(outDir, "entry.png");
+  fs.writeFileSync(target, payload);
   if (process.env.MAKEFUN_VERBOSE === "1") {
-    console.log(
-      `[takinainoue27/news-image-01] Wrote ${spec.encoding} ${spec.cols}x${spec.rows} (${spec.byteCount} bytes, sha256=${spec.sha256Hex.slice(0, 12)}) to ${targetPng}`
-    );
+    console.log(`[${meta.format}] ${meta.width}x${meta.height} (${meta.bytes} B, sha256=${meta.digest.slice(0, 12)}) -> ${target}`);
   }
 }
 
-emitEntryImage();
+emitEntry();
